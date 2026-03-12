@@ -36,6 +36,7 @@ When a scanner discovers a peer, it can optionally connect to read the full PwnG
 | Face | `b34c0000-dead-face-1337-c0deba5e0003` | Read, Notify | Current face/mood string |
 | Name | `b34c0000-dead-face-1337-c0deba5e0004` | Read | Device name |
 | Signal | `b34c0000-dead-face-1337-c0deba5e0005` | Write | Ping/poke another unit |
+| Message | `b34c0000-dead-face-1337-c0deba5e0006` | Read, Write, Notify | Text messages between peers |
 
 UUIDs are hand-crafted hex leetspeak: **"beacon dead-face leet codebase"**.
 
