@@ -22,7 +22,10 @@ static BLECharacteristic* char_identity = nullptr;
 static BLECharacteristic* char_face = nullptr;
 static BLECharacteristic* char_name = nullptr;
 static BLECharacteristic* char_signal = nullptr;
+static BLECharacteristic* char_message = nullptr;
 static BLEAdvertising*    ble_advertising = nullptr;
+
+static pwnbeacon_message_cb_t message_callback = nullptr;
 
 // --- Helpers ---
 
@@ -164,6 +167,26 @@ class PwnBeaconSignalCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// --- Message (write) callback ---
+class PwnBeaconMessageCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* characteristic) override {
+    String raw = characteristic->getValue();
+    Serial.printf("[PwnBeacon] Message received: %s\n", raw.c_str());
+
+    if (message_callback) {
+      // Parse "sender:message" format
+      int sep = raw.indexOf(':');
+      if (sep > 0) {
+        String sender = raw.substring(0, sep);
+        String msg = raw.substring(sep + 1);
+        message_callback(sender.c_str(), msg.c_str());
+      } else {
+        message_callback("unknown", raw.c_str());
+      }
+    }
+  }
+};
+
 // --- Public API ---
 
 String pwnbeaconBuildIdentityJson() {
@@ -227,6 +250,15 @@ void pwnbeaconInit(const char* name, const char* identity) {
       PWNBEACON_SIGNAL_CHAR_UUID,
       BLECharacteristic::PROPERTY_WRITE);
   char_signal->setCallbacks(new PwnBeaconSignalCallback());
+
+  // Message characteristic — read/write/notify for text messages
+  char_message = service->createCharacteristic(
+      PWNBEACON_MESSAGE_CHAR_UUID,
+      BLECharacteristic::PROPERTY_READ |
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_NOTIFY);
+  char_message->addDescriptor(new BLE2902());
+  char_message->setCallbacks(new PwnBeaconMessageCallback());
 
   service->start();
 
@@ -315,4 +347,21 @@ int8_t pwnbeaconGetClosestRssi() {
     }
   }
   return closest;
+}
+
+void pwnbeaconSetMessageCallback(pwnbeacon_message_cb_t cb) {
+  message_callback = cb;
+}
+
+void pwnbeaconSendMessage(const char* message) {
+  if (!char_message) {
+    return;
+  }
+
+  // Format as "name:message"
+  String payload = String(local_name) + ":" + String(message);
+  char_message->setValue(payload.c_str());
+  char_message->notify();
+
+  Serial.printf("[PwnBeacon] Message sent: %s\n", message);
 }

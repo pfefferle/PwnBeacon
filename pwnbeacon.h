@@ -11,6 +11,7 @@
 #define PWNBEACON_FACE_CHAR_UUID      "b34c0000-dead-face-1337-c0deba5e0003"
 #define PWNBEACON_NAME_CHAR_UUID      "b34c0000-dead-face-1337-c0deba5e0004"
 #define PWNBEACON_SIGNAL_CHAR_UUID    "b34c0000-dead-face-1337-c0deba5e0005"
+#define PWNBEACON_MESSAGE_CHAR_UUID   "b34c0000-dead-face-1337-c0deba5e0006"
 
 // --- Protocol constants ---
 #define PWNBEACON_PROTOCOL_VERSION  0x01
@@ -54,6 +55,9 @@ typedef struct {
   uint8_t   fingerprint[PWNBEACON_FINGERPRINT_LEN];
 } pwnbeacon_peer_t;
 
+// --- Message callback type ---
+typedef void (*pwnbeacon_message_cb_t)(const char* sender, const char* message);
+
 // --- Public API ---
 void              pwnbeaconInit(const char* name, const char* identity);
 void              pwnbeaconSetFace(const char* face);
@@ -61,6 +65,8 @@ void              pwnbeaconSetPwnd(uint16_t run, uint16_t tot);
 void              pwnbeaconAdvertise();
 void              pwnbeaconScan(uint16_t duration_ms);
 void              pwnbeaconCheckGonePeers();
+void              pwnbeaconSetMessageCallback(pwnbeacon_message_cb_t cb);
+void              pwnbeaconSendMessage(const char* message);
 pwnbeacon_peer_t* pwnbeaconGetPeers();
 uint8_t           pwnbeaconGetPeerCount();
 String            pwnbeaconGetLastFriendName();
