@@ -24,7 +24,7 @@ Each device continuously broadcasts a BLE advertisement containing a compact bin
 | 12 | 1 | Name length (N, max 8) |
 | 13 | N | Name (UTF-8, truncated to 8 bytes) |
 
-**Service UUID:** `b34c0000-dead-face-1337-c0deba5e0001`
+**Service UUID:** `b34c0000-0000-0000-1337-000000000001`
 
 ### 2. GATT Service (Full Data Exchange)
 
@@ -32,13 +32,13 @@ When a scanner discovers a peer, it can optionally connect to read the full PwnG
 
 | Characteristic | UUID | Properties | Description |
 |----------------|------|------------|-------------|
-| Identity | `b34c0000-dead-face-1337-c0deba5e0002` | Read | Full JSON payload |
-| Face | `b34c0000-dead-face-1337-c0deba5e0003` | Read, Notify | Current face/mood string |
-| Name | `b34c0000-dead-face-1337-c0deba5e0004` | Read | Device name |
-| Signal | `b34c0000-dead-face-1337-c0deba5e0005` | Write | Ping/poke another unit |
-| Message | `b34c0000-dead-face-1337-c0deba5e0006` | Read, Write, Notify | Text messages between peers |
+| Identity | `b34c0000-0000-0000-1337-000000000002` | Read | Full JSON payload |
+| Face | `b34c0000-0000-0000-1337-000000000003` | Read, Notify | Current face/mood string |
+| Name | `b34c0000-0000-0000-1337-000000000004` | Read | Device name |
+| Signal | `b34c0000-0000-0000-1337-000000000005` | Write | Ping/poke another unit |
+| Message | `b34c0000-0000-0000-1337-000000000006` | Read, Write, Notify | Text messages between peers |
 
-UUIDs are hand-crafted hex leetspeak: **"beacon dead-face leet codebase"**.
+UUIDs are hand-crafted hex leetspeak: **"b34c0n 1337"**.
 
 ### JSON Payload (Identity Characteristic)
 
