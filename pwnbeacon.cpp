@@ -1,8 +1,6 @@
 #include "pwnbeacon.h"
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <ArduinoJson.h>
+#include <NimBLEDevice.h>
 #include <mbedtls/sha256.h>
 
 // --- Local state ---
@@ -12,31 +10,30 @@ static String           last_friend_name = "";
 
 static char     local_name[PWNBEACON_ADV_MAX_NAME_LEN + 1] = {0};
 static char     local_identity[129] = {0};
-static char     local_face[64] = "(◕‿‿◕)";
+static char     local_face[64] = "(O__O)";
 static uint16_t local_pwnd_run = 0;
 static uint16_t local_pwnd_tot = 0;
 static uint8_t  local_fingerprint[PWNBEACON_FINGERPRINT_LEN] = {0};
 
-static BLEServer*         ble_server = nullptr;
-static BLECharacteristic* char_identity = nullptr;
-static BLECharacteristic* char_face = nullptr;
-static BLECharacteristic* char_name = nullptr;
-static BLECharacteristic* char_signal = nullptr;
-static BLECharacteristic* char_message = nullptr;
-static BLEAdvertising*    ble_advertising = nullptr;
+static NimBLEServer*         ble_server = nullptr;
+static NimBLECharacteristic* char_identity = nullptr;
+static NimBLECharacteristic* char_face = nullptr;
+static NimBLECharacteristic* char_name = nullptr;
+static NimBLECharacteristic* char_signal = nullptr;
+static NimBLECharacteristic* char_message = nullptr;
+static NimBLEAdvertising*    ble_advertising = nullptr;
 
 static pwnbeacon_message_cb_t message_callback = nullptr;
+static bool ble_scanning = false;
 
 // --- Helpers ---
 
-// Compute first 6 bytes of SHA-256 of the identity hex string
 static void computeFingerprint(const char* identity, uint8_t* out) {
   uint8_t hash[32];
   mbedtls_sha256((const unsigned char*)identity, strlen(identity), hash, 0);
   memcpy(out, hash, PWNBEACON_FINGERPRINT_LEN);
 }
 
-// Build the compact advertisement payload
 static void buildAdvPayload(uint8_t* buf, size_t* len) {
   pwnbeacon_adv_t adv;
   memset(&adv, 0, sizeof(adv));
@@ -54,12 +51,10 @@ static void buildAdvPayload(uint8_t* buf, size_t* len) {
   adv.name_len = (uint8_t)name_len;
   memcpy(adv.name, local_name, name_len);
 
-  // Actual payload size = fixed fields + name_len (not full 8 bytes)
   *len = offsetof(pwnbeacon_adv_t, name) + name_len;
   memcpy(buf, &adv, *len);
 }
 
-// Find peer by fingerprint, returns index or -1
 static int findPeerByFingerprint(const uint8_t* fp) {
   for (uint8_t i = 0; i < peer_count; i++) {
     if (memcmp(peers[i].fingerprint, fp, PWNBEACON_FINGERPRINT_LEN) == 0) {
@@ -69,10 +64,10 @@ static int findPeerByFingerprint(const uint8_t* fp) {
   return -1;
 }
 
-// Parse a received advertisement payload into peer data
-static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
+static void addPeer(const uint8_t* data, size_t len, int8_t rssi,
+                    const char* ble_name) {
   if (len < offsetof(pwnbeacon_adv_t, name)) {
-    return;  // Too short
+    return;
   }
 
   pwnbeacon_adv_t adv;
@@ -81,7 +76,7 @@ static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
   memcpy(&adv, data, copy_len);
 
   if (adv.version != PWNBEACON_PROTOCOL_VERSION) {
-    return;  // Unknown version
+    return;
   }
 
   // Don't add ourselves
@@ -92,7 +87,6 @@ static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
   int idx = findPeerByFingerprint(adv.fingerprint);
 
   if (idx >= 0) {
-    // Update existing peer
     peers[idx].rssi      = rssi;
     peers[idx].last_seen = millis();
     peers[idx].gone      = false;
@@ -101,9 +95,8 @@ static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
     return;
   }
 
-  // Add new peer
   if (peer_count >= PWNBEACON_MAX_PEERS) {
-    return;  // Peer list full
+    return;
   }
 
   uint8_t name_len = adv.name_len;
@@ -112,7 +105,13 @@ static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
   }
 
   memset(&peers[peer_count], 0, sizeof(pwnbeacon_peer_t));
-  peers[peer_count].name      = String(adv.name).substring(0, name_len);
+  if (name_len > 0) {
+    peers[peer_count].name = String(adv.name).substring(0, name_len);
+  } else if (ble_name && strlen(ble_name) > 0) {
+    peers[peer_count].name = String(ble_name);
+  } else {
+    peers[peer_count].name = "BLE peer";
+  }
   peers[peer_count].pwnd_run  = adv.pwnd_run;
   peers[peer_count].pwnd_tot  = adv.pwnd_tot;
   peers[peer_count].rssi      = rssi;
@@ -123,66 +122,57 @@ static void parseAdvPayload(const uint8_t* data, size_t len, int8_t rssi) {
 
   last_friend_name = peers[peer_count].name;
   peer_count++;
-
-  Serial.printf("[PwnBeacon] New peer: %s (RSSI: %d)\n",
-                last_friend_name.c_str(), rssi);
 }
 
-// --- BLE Scan Callback ---
-class PwnBeaconScanCallback : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice advertisedDevice) override {
-    if (!advertisedDevice.haveServiceUUID()) {
-      return;
+// --- NimBLE Scan Callbacks ---
+class PwnBeaconScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* device) override {
+    int svcDataCount = device->getServiceDataCount();
+    for (int i = 0; i < svcDataCount; i++) {
+      if (device->getServiceDataUUID(i).equals(NimBLEUUID(PWNBEACON_SERVICE_UUID))) {
+        std::string svcData = device->getServiceData(i);
+        std::string devName = device->getName();
+        addPeer((const uint8_t*)svcData.data(), svcData.length(),
+                device->getRSSI(), devName.c_str());
+        break;
+      }
     }
-    if (!advertisedDevice.isAdvertisingService(BLEUUID(PWNBEACON_SERVICE_UUID))) {
-      return;
-    }
+  }
 
-    if (advertisedDevice.haveServiceData()) {
-      String svcData = advertisedDevice.getServiceData();
-      parseAdvPayload((const uint8_t*)svcData.c_str(), svcData.length(),
-                      advertisedDevice.getRSSI());
-    }
+  void onScanEnd(const NimBLEScanResults& results, int reason) override {
+    ble_scanning = false;
   }
 };
 
-// --- BLE Server Callback ---
-class PwnBeaconServerCallback : public BLEServerCallbacks {
-  void onConnect(BLEServer* server) override {
-    Serial.println("[PwnBeacon] Peer connected via GATT");
-  }
+static PwnBeaconScanCallbacks scanCallbacks;
 
-  void onDisconnect(BLEServer* server) override {
-    Serial.println("[PwnBeacon] Peer disconnected");
-    // Restart advertising after disconnect
+// --- NimBLE Server Callbacks ---
+class PwnBeaconServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
+    // Restart advertising so other peers can still discover us
     ble_advertising->start();
   }
 };
 
 // --- Signal (write) callback ---
-class PwnBeaconSignalCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* characteristic) override {
-    String value = characteristic->getValue();
-    Serial.printf("[PwnBeacon] Signal received: %s\n", value.c_str());
+class SignalCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
+    // Signal received — can be used for ping/poke
   }
 };
 
 // --- Message (write) callback ---
-class PwnBeaconMessageCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* characteristic) override {
-    String raw = characteristic->getValue();
-    Serial.printf("[PwnBeacon] Message received: %s\n", raw.c_str());
+class MessageCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
+    std::string raw = characteristic->getValue();
+    if (!message_callback) return;
 
-    if (message_callback) {
-      // Parse "sender:message" format
-      int sep = raw.indexOf(':');
-      if (sep > 0) {
-        String sender = raw.substring(0, sep);
-        String msg = raw.substring(sep + 1);
-        message_callback(sender.c_str(), msg.c_str());
-      } else {
-        message_callback("unknown", raw.c_str());
-      }
+    String val = String(raw.c_str());
+    int sep = val.indexOf(':');
+    if (sep > 0) {
+      message_callback(val.substring(0, sep).c_str(), val.substring(sep + 1).c_str());
+    } else {
+      message_callback("unknown", val.c_str());
     }
   }
 };
@@ -200,7 +190,7 @@ String pwnbeaconBuildIdentityJson() {
   doc["identity"]     = local_identity;
   doc["pwnd_run"]     = local_pwnd_run;
   doc["pwnd_tot"]     = local_pwnd_tot;
-  doc["session_id"]   = BLEDevice::getAddress().toString().c_str();
+  doc["session_id"]   = NimBLEDevice::getAddress().toString().c_str();
   doc["timestamp"]    = (int)(millis() / 1000);
   doc["uptime"]       = (int)(millis() / 1000);
   doc["version"]      = "1.8.4";
@@ -211,65 +201,53 @@ String pwnbeaconBuildIdentityJson() {
 }
 
 void pwnbeaconInit(const char* name, const char* identity) {
-  // Store local identity
   strncpy(local_name, name, PWNBEACON_ADV_MAX_NAME_LEN);
   local_name[PWNBEACON_ADV_MAX_NAME_LEN] = '\0';
   strncpy(local_identity, identity, sizeof(local_identity) - 1);
   computeFingerprint(identity, local_fingerprint);
 
-  // Initialize BLE
-  BLEDevice::init(name);
+  NimBLEDevice::init(name);
 
   // Create GATT server
-  ble_server = BLEDevice::createServer();
-  ble_server->setCallbacks(new PwnBeaconServerCallback());
+  ble_server = NimBLEDevice::createServer();
+  ble_server->setCallbacks(new PwnBeaconServerCallbacks());
 
-  BLEService* service = ble_server->createService(PWNBEACON_SERVICE_UUID);
+  NimBLEService* service = ble_server->createService(PWNBEACON_SERVICE_UUID);
 
-  // Identity characteristic — full JSON payload
+  // Identity — full JSON payload (read)
   char_identity = service->createCharacteristic(
-      PWNBEACON_IDENTITY_CHAR_UUID,
-      BLECharacteristic::PROPERTY_READ);
-  char_identity->setValue(pwnbeaconBuildIdentityJson().c_str());
+      PWNBEACON_IDENTITY_CHAR_UUID, NIMBLE_PROPERTY::READ);
+  char_identity->setValue(pwnbeaconBuildIdentityJson());
 
-  // Face characteristic — current mood
+  // Face — current mood (read + notify)
   char_face = service->createCharacteristic(
       PWNBEACON_FACE_CHAR_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  char_face->addDescriptor(new BLE2902());
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   char_face->setValue(local_face);
 
-  // Name characteristic
+  // Name (read)
   char_name = service->createCharacteristic(
-      PWNBEACON_NAME_CHAR_UUID,
-      BLECharacteristic::PROPERTY_READ);
+      PWNBEACON_NAME_CHAR_UUID, NIMBLE_PROPERTY::READ);
   char_name->setValue(local_name);
 
-  // Signal characteristic — write-only for pinging
+  // Signal — write-only ping/poke
   char_signal = service->createCharacteristic(
-      PWNBEACON_SIGNAL_CHAR_UUID,
-      BLECharacteristic::PROPERTY_WRITE);
-  char_signal->setCallbacks(new PwnBeaconSignalCallback());
+      PWNBEACON_SIGNAL_CHAR_UUID, NIMBLE_PROPERTY::WRITE);
+  char_signal->setCallbacks(new SignalCallbacks());
 
-  // Message characteristic — read/write/notify for text messages
+  // Message — read/write/notify for text messages
   char_message = service->createCharacteristic(
       PWNBEACON_MESSAGE_CHAR_UUID,
-      BLECharacteristic::PROPERTY_READ |
-      BLECharacteristic::PROPERTY_WRITE |
-      BLECharacteristic::PROPERTY_NOTIFY);
-  char_message->addDescriptor(new BLE2902());
-  char_message->setCallbacks(new PwnBeaconMessageCallback());
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+  char_message->setCallbacks(new MessageCallbacks());
 
   service->start();
 
-  // Set up advertising with service data
-  ble_advertising = BLEDevice::getAdvertising();
-  ble_advertising->addServiceUUID(PWNBEACON_SERVICE_UUID);
-  ble_advertising->setScanResponse(true);
-  ble_advertising->setMinPreferred(0x06);
-
-  Serial.printf("[PwnBeacon] Initialized: %s [%s]\n", name,
-                BLEDevice::getAddress().toString().c_str());
+  // Set up advertising
+  ble_advertising = NimBLEDevice::getAdvertising();
+  ble_advertising->addServiceUUID(NimBLEUUID(PWNBEACON_SERVICE_UUID));
+  ble_advertising->setMinInterval(0x20);
+  ble_advertising->setMaxInterval(0x40);
 }
 
 void pwnbeaconSetFace(const char* face) {
@@ -281,7 +259,7 @@ void pwnbeaconSetFace(const char* face) {
     char_face->notify();
   }
   if (char_identity) {
-    char_identity->setValue(pwnbeaconBuildIdentityJson().c_str());
+    char_identity->setValue(pwnbeaconBuildIdentityJson());
   }
 }
 
@@ -290,7 +268,7 @@ void pwnbeaconSetPwnd(uint16_t run, uint16_t tot) {
   local_pwnd_tot = tot;
 
   if (char_identity) {
-    char_identity->setValue(pwnbeaconBuildIdentityJson().c_str());
+    char_identity->setValue(pwnbeaconBuildIdentityJson());
   }
 }
 
@@ -299,22 +277,44 @@ void pwnbeaconAdvertise() {
   size_t adv_len = 0;
   buildAdvPayload(adv_data, &adv_len);
 
-  // Set service data in the advertisement
-  BLEAdvertisementData scanResponse;
-  scanResponse.setServiceData(BLEUUID(PWNBEACON_SERVICE_UUID),
-                              std::string((char*)adv_data, adv_len));
-  ble_advertising->setScanResponseData(scanResponse);
+  // BLE scan response: 31 bytes max, 128-bit UUID takes 18 bytes overhead,
+  // leaving ~13 bytes for service data. Clamp to 10 for safety.
+  if (adv_len > 10) {
+    adv_len = 10;
+  }
+
+  NimBLEAdvertisementData advData;
+  advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+  advData.setCompleteServices(NimBLEUUID(PWNBEACON_SERVICE_UUID));
+
+  NimBLEAdvertisementData scanResp;
+  scanResp.setServiceData(NimBLEUUID(PWNBEACON_SERVICE_UUID),
+                          std::string((char*)adv_data, adv_len));
+
+  ble_advertising->stop();
+  ble_advertising->setAdvertisementData(advData);
+  ble_advertising->setScanResponseData(scanResp);
   ble_advertising->start();
 }
 
 void pwnbeaconScan(uint16_t duration_ms) {
-  BLEScan* scanner = BLEDevice::getScan();
-  scanner->setAdvertisedDeviceCallbacks(new PwnBeaconScanCallback(), true);
+  if (ble_scanning) return;
+
+  NimBLEScan* scanner = NimBLEDevice::getScan();
+  scanner->setScanCallbacks(&scanCallbacks, true);
   scanner->setActiveScan(true);
-  scanner->setInterval(100);
-  scanner->setWindow(99);
-  scanner->start(duration_ms / 1000, false);
+  scanner->setInterval(45);
+  scanner->setWindow(15);
   scanner->clearResults();
+
+  ble_scanning = true;
+  if (!scanner->start(duration_ms)) {
+    ble_scanning = false;
+  }
+}
+
+bool pwnbeaconIsScanning() {
+  return ble_scanning;
 }
 
 void pwnbeaconCheckGonePeers() {
@@ -322,7 +322,6 @@ void pwnbeaconCheckGonePeers() {
   for (uint8_t i = 0; i < peer_count; i++) {
     if (!peers[i].gone && (now - peers[i].last_seen) > PWNBEACON_PEER_TIMEOUT_MS) {
       peers[i].gone = true;
-      Serial.printf("[PwnBeacon] Peer gone: %s\n", peers[i].name.c_str());
     }
   }
 }
@@ -354,14 +353,9 @@ void pwnbeaconSetMessageCallback(pwnbeacon_message_cb_t cb) {
 }
 
 void pwnbeaconSendMessage(const char* message) {
-  if (!char_message) {
-    return;
-  }
+  if (!char_message) return;
 
-  // Format as "name:message"
   String payload = String(local_name) + ":" + String(message);
-  char_message->setValue(payload.c_str());
+  char_message->setValue(payload);
   char_message->notify();
-
-  Serial.printf("[PwnBeacon] Message sent: %s\n", message);
 }

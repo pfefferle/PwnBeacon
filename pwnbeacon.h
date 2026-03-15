@@ -1,11 +1,9 @@
-#ifndef PWNBEACON_H
-#define PWNBEACON_H
+#pragma once
 
 #include "Arduino.h"
-#include "ArduinoJson.h"
 
 // --- PwnBeacon Service UUIDs ---
-// "beacon leet"
+// Hand-crafted hex leetspeak: "b34c0n 1337"
 #define PWNBEACON_SERVICE_UUID        "b34c0000-0000-0000-1337-000000000001"
 #define PWNBEACON_IDENTITY_CHAR_UUID  "b34c0000-0000-0000-1337-000000000002"
 #define PWNBEACON_FACE_CHAR_UUID      "b34c0000-0000-0000-1337-000000000003"
@@ -25,6 +23,11 @@
 #define PWNBEACON_FLAG_CONNECTABLE  0x02
 
 // --- Advertisement packet (compact binary, max 21 bytes) ---
+//
+// Designed to fit within a BLE scan response alongside a 128-bit
+// service UUID (18 bytes overhead), leaving ~13 bytes for data.
+// Variable-length: fixed header (13 bytes) + name (0-8 bytes).
+//
 typedef struct __attribute__((packed)) {
   uint8_t  version;                                // Protocol version (0x01)
   uint8_t  flags;                                  // Bitfield flags
@@ -36,22 +39,27 @@ typedef struct __attribute__((packed)) {
 } pwnbeacon_adv_t;
 
 // --- Peer data ---
+//
+// Mirrors the Identity JSON fields defined in the protocol spec.
+// Advertising populates: name, pwnd_run, pwnd_tot, fingerprint, rssi.
+// GATT connection populates the remaining fields and sets full_data = true.
+//
 typedef struct {
-  int       epoch;
-  String    face;
-  String    grid_version;
-  String    identity;
   String    name;
-  int       pwnd_run;
-  int       pwnd_tot;
+  String    face;
+  String    identity;
+  String    grid_version;
   String    session_id;
+  String    version;
+  int       epoch;
+  uint16_t  pwnd_run;
+  uint16_t  pwnd_tot;
   int       timestamp;
   int       uptime;
-  String    version;
   int8_t    rssi;
   uint32_t  last_seen;
   bool      gone;
-  bool      full_data;  // true if populated via GATT connection
+  bool      full_data;
   uint8_t   fingerprint[PWNBEACON_FINGERPRINT_LEN];
 } pwnbeacon_peer_t;
 
@@ -64,6 +72,7 @@ void              pwnbeaconSetFace(const char* face);
 void              pwnbeaconSetPwnd(uint16_t run, uint16_t tot);
 void              pwnbeaconAdvertise();
 void              pwnbeaconScan(uint16_t duration_ms);
+bool              pwnbeaconIsScanning();
 void              pwnbeaconCheckGonePeers();
 void              pwnbeaconSetMessageCallback(pwnbeacon_message_cb_t cb);
 void              pwnbeaconSendMessage(const char* message);
@@ -72,5 +81,3 @@ uint8_t           pwnbeaconGetPeerCount();
 String            pwnbeaconGetLastFriendName();
 int8_t            pwnbeaconGetClosestRssi();
 String            pwnbeaconBuildIdentityJson();
-
-#endif // PWNBEACON_H
